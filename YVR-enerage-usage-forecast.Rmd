@@ -1,0 +1,648 @@
+---
+title: "BABS_502_project"
+output: html_document
+date: "2023-04-03"
+---
+
+# Introduction
+
+The main goal of this project is to develop a model to forecast monthly energy use for the Vancouver International Airport (YVR).
+
+Budget planning at YVR requires forecasting the cost of energy to operate the airport. An accurate forecast could help the YVR representatives negotiate more favorable contracts with energy suppliers.
+
+# Data description
+
+Data was taken from 14 years of records from the YVR database. This data set includes information on date, energy use, temperature, terminal area, and number of passengers. Data have been aggregated by month into 168 records (14 years with 12 months each).
+
+| \#  | Variable                 | Definition                                                                          |
+|:-----------------------|:-----------------------|:-----------------------|
+| 1   | month                    | Month and year, e.g.: Nov-98                                                        |
+| 2   | energy                   | Energy use measured in thousands of kilowatt hours (kWh)                            |
+| 3   | mean.temp                | Mean monthly temperature outside (degrees Celsius)                                  |
+| 4   | total.area               | Total area of all terminals (sq. m.)                                                |
+| 5   | total.passengers         | Total number of passengers in thousands                                             |
+| 6   | domestic.passengers      | Total number of domestic passengers (traveling within Canada) in thousands          |
+| 7   | US.passengers            | Total number of passengers traveling between Canada and the US in thousands         |
+| 8   | international.passengers | Total number of passengers traveling between YVR and countries other than Canada/US |
+
+In this project, I will develop appropriate models, compare the models, and discuss advantages and limitations of each model. I then select the best model and use it to provide monthly forecasts for energy use for the next three years (January 2011 through December 2013).
+
+# Data Preprocessing
+
+```{r}
+library(fpp2) # load the Forecasting: Principles and Practice package, as well as all its dependencies
+library("corrplot")
+# library("PerformanceAnalytics")
+library("RColorBrewer")
+library("dplyr")
+library("tidyr")
+library("tidyverse")
+library("car")
+YVR_rawdata <- read.csv(file = 'Energy use at YVR.csv')
+head(YVR_rawdata)
+```
+
+```{r}
+ts_YVRdata <- ts(data = YVR_rawdata[,2], start = c(1997,01,01) , end = c(2010,12,31), frequency = 12)
+ts_YVRdata
+```
+
+## Time plot
+
+```{r}
+options(repr.plot.width=12, repr.plot.height=8)
+autoplot(ts_YVRdata, 
+         xlab = "Year",
+         ylab="Energy usage measured in thousands \n of  kilowatt per hours (kWh)") +
+theme(text = element_text(size = 20), plot.title = element_text(hjust = 0.5, size=30)) +
+ggtitle("Energy usage vs Time") 
+```
+
+## Box-Cox transformation
+
+```{r}
+lambda <- BoxCox.lambda(ts_YVRdata)
+lambda
+par(mfrow=c(2,1), mar=c(4,4,4,1))
+plot(ts_YVRdata, ylab="Original Energy usage (kWh)", xlab="Year", main="Original Energy usage (kWh)")
+plot(BoxCox(ts_YVRdata,lambda), ylab="Transformed Energy usage (kWh)",
+     xlab="Year", main="Box-Cox Transformed Energy usage (kWh)")
+```
+
+## Calendar adjustment for number of days in each month
+
+```{r}
+par(mfrow=c(2,1), mar=c(4,4,4,1))
+plot(ts_YVRdata, ylab="Original Energy usage (kWh)", xlab="Year", main="Original Energy usage (kWh)")
+plot(ts_YVRdata/monthdays(ts_YVRdata), ylab="Average energy usage (kWh)",
+     xlab="Year", main="Calendar-adjusted energy usage for every month (kWh)")
+# maybe use "Calendar-adjusted Energy Usage (kWh)" as title?
+```
+
+## Split into the training and test set
+
+```{r}
+YVRdata_train <- window(ts_YVRdata,start=c(1997,1),end=c(2007,12))
+YVRdata_test <- window(ts_YVRdata,start=2008)
+# plot(YVRdata_train)
+YVRdata_train_adj <- YVRdata_train/monthdays(YVRdata_train)
+YVRdata_test_adj <- YVRdata_test/monthdays(YVRdata_test)
+# plot(YVRdata_train_adj)
+```
+
+# Introduction & Approach
+
+The primary for the project is to have a forecast model to predict monthly energy usage for Vancouver International Airport (YVR). With an accurate forecast of energy usage, the YVR representatives can reach a more favorable deal with energy supplier for a better budget planning.
+
+The data included 14 years monthly data (1997-2010), including energy usage, date, and other related variables. After transformation check and calendar adjustment check, I investigated seasonality and trend in data. By checking the other variables in data, I found out the area of YVR impacts trend of energy usage while the number of total passengers and temperature related to seasonality in data.
+
+There are three types of models are tried out in this project: basic forecasting methods, exponential smoothing model (EST), and ARIMA model. We selected the representative models with lowest MSE within each type of model. The EST (MAA) is our final recommendation based on the model accuracy on test data and reasonability of visualized forecasts
+
+There are some limitations in our analysis and final model. Our selected model performs its best within ten years. If longer forecast period is required, we would consider adding damped adjustment on current models. The ETS also is unable to catch some unusual observations, so we used ARIMA to assist with validating the forecast. To address potential multiple seasonality in data, we propose to conduct an explanatory model to ease the limitation in ETS on single and fixed seasonality assumption.
+
+# Exploratory Data Analysis
+
+From the plot 1 (YVR's Energy usage from 1997 to 2010), there is a seasonality element with trend and noises. We use slt decomposition method to check the three elements separately. By checking the decomposition plot (plot 2. Decomposition by slt), we can see that there are 14 peaks and valleys in 14 years, indicating annual frequency. The trend is fluctuated, and we will analyse further in the later section.
+
+For the seasonality component, from the plot 3 (Seasonality pattern with trend and remainders for energy usage), we can see that usage peak happens in August and valley is in March. By removing the trend and remainder terms (Plot 4. Seasonality pattern without trend and remainders for energy usage), the conclusion for peak and valley keeps the same. Remainder graph looks like a white noise process.
+
+For the trend and cycle analysis, we think there is no cycle but a clear trend in data. We let stl decomposition to select optimal smoothing degree and the output is in the plot 5 (Trend in electricity usage in YVR). There is an increasing trend starting in 1998 and the trend begins to stabilize with small fluctuation between year 2000 and 2007. Starting from 2007, the usage has a rising trend till the last year of observation 2010.
+
+When we zoom in to the remainder portion, there are two negative outliers happen in end of year 1999 and 2009. Even with outliers, the remainders approximately and evenly spread around 0.
+
+```{r}
+autoplot(ts_YVRdata, 
+         xlab = "Year",
+         ylab="Energy usage (kilowatt per hours [kWh])") +
+theme(text = element_text(size = 15), plot.title = element_text(hjust = 0.5, size=20)) +
+ggtitle("Plot 1. YVR's Energy usage from 1997 to 2010") 
+```
+
+```{r}
+fit_0 <- stl(ts_YVRdata, t.window=13, s.window="periodic", robust=TRUE)
+plot(fit_0, main = "Plot 2. Decomposition by slt", cex.main=3)
+#Additive decomposition only since there is no seasonal variation 
+```
+
+```{r}
+monthplot(ts_YVRdata, main = "Plot 3. Seasonality pattern with trend and remainders for energy usage", 
+          ylab="Energy usage (kilowatt per hours [kWh])",
+         xlab="Month",cex.main=1.5, cex.lab=1.2)
+# from the plot below, we can see the peak happens in August and valley happens in March 
+```
+
+```{r}
+# plot with seasonal components only 
+# without the trend and remainder, the seasonal plot provides the same conclusion
+monthplot(seasonal(fit_0),main = "Plot 4. Seasonality pattern without trend and remainders for energy usage", 
+          ylab="Energy usage - Seasonality portion (kilowatt per hours [kWh])",
+         xlab="Month",cex.main=1.5, cex.lab=1.2)
+```
+
+```{r}
+# Looking at the trend component (moving average at 12*2)
+# Alternative code:
+#trend_ele = ma(ts_YVRdata, order = 12, centre = TRUE);plot(ts_YVRdata);lines(trend_ele, col="red")
+
+plot(ts_YVRdata, col="black", main="Plot 5. Trend in electricity usage in YVR", 
+     ylab="Energy usage - trend portion (kilowatt per hours [kWh])", xlab="Year",cex.main=1.5)
+lines(fit_0$time.series[,2],col="red",ylab="Trend",lwd="2") # Graph the trend-cycle
+```
+
+```{r}
+# plot for remainders in data
+plot(remainder(fit_0),main = "Plot 6. Remainders in electricity usage data for YVR", 
+          ylab="Energy usage - Remainder portion (kilowatt per hours [kWh])",
+         xlab="Year",cex.main=1.5, cex.lab=1.2)
+abline(h=0,col="red",lwd="2")
+```
+
+## Potential causes
+
+By checking the correlation between energy usage and other factors and the correlations among other factors (The correlation graph), we can see that energy usage has a significant positive correlation with total area, making sense since larger area requires more energy to provide heat/cold and lights. There are moderate correlations between energy usage and number of international/domestic/total passengers.
+
+Among international, domestic, and total number of passengers, there are strong positive correlations. Therefore, we can use the connection between total number of passengers and energy usage for next analysis.
+
+In the trend of YVR's area (plot 8), and we can see there are two significant expansions in year 1999 and end of year 2016, approximately matching the two turning point in energy usage trend (end of 1998 and beginning of 2007). The shapes of two trend alike each other. There are two stabilized periods: one is before 1999 and the other is between 2000 and 2007. Other years or period, there are constantly increasing trend in both YVR's area and energy usage. Therefore, considering strong positive correlation between these two, we can conclude that the trend in energy usage is mainly caused by YVR's area.
+
+In terms of seasonality of energy usage, we decompose the total number of passengers (plot 9) and analyze its seasonality portion (plot 11). By comparing the seasonality patterns for energy usage (plot 10) and number of total passengers, we can see there is consistency from May to October. Both two metrics start increasing in May and reach the peak in August, then fall back in October.
+
+Therefore, the total number of travellers between May and October, depending on the natural of weathers, determining the seasonality of energy usage in YVR. During winter period between November to February with cold weather (plot 12), even with fewer passengers, YVR still needs to consumer significant amount of energy for the heat. For the valley in the March in energy usage's seasonality, it could be explained as the temperature starts going up and no heats or cold is required during March.
+
+No historical events or data could explain the two outliers in remainder terms for energy usage. Therefore, we think it is due to randomness.
+
+```{r}
+# check what other variables 
+reg_YVR <- YVR_rawdata[,-1]
+head(reg_YVR)
+```
+
+```{r}
+# Checking the correlation
+# pairs() would work too
+P <- cor(reg_YVR)
+print(P)
+corrplot(P, type="upper", order="hclust",
+         col=brewer.pal(n=8, name="RdYlBu"))
+```
+
+```{r}
+# Prepare time series data for other variables 
+ts_YVRdata_pas<- ts(data = YVR_rawdata[,5], start = c(1997,01,01) , end = c(2010,12,31), frequency = 12)
+ts_YVRdata_area <- ts(data = YVR_rawdata[,4], start = c(1997,01,01) , end = c(2010,12,31), frequency = 12)
+ts_YVRdata_temp<- ts(data = YVR_rawdata[,3], start = c(1997,01,01) , end = c(2010,12,31), frequency = 12)
+
+# Plot the trend and area of YVR
+par(mfrow=c(2,1))
+plot(fit_0$time.series[,2], main="Plot 7. Trend in electricity usage in YVR", 
+     ylab="Energy usage - trend portion (kWh)", xlab="Year",cex.main=1.5)
+plot(ts_YVRdata_area, main="Plot 8. Trend of YVR's area 1997-2010", 
+     ylab="Area", xlab="Year",cex.main=1.5)
+```
+
+```{r}
+# Look into the seasonality of number of passengers
+fit_1 <- stl(ts_YVRdata_pas, t.window=13, s.window="periodic", robust=TRUE)
+plot(fit_1, main = "Plot 9. stl decomposition for total number of passengers")
+```
+
+```{r}
+# Compare the seasonality of energy usage and number of passangers 
+par(mfrow=c(2,1))
+monthplot(seasonal(fit_0), main = "Plot 10. Seasonality pattern only for energy usage", 
+          ylab="Monthly energy usage - Seasonality portion (kilowatt per hours [kWh])",
+         xlab="Month",
+         cex.main=1.5)
+monthplot(seasonal(fit_1),main = "Plot 11. Seasonality pattern only for total number of travellers", 
+          ylab="Monthly total number of passengers",
+         xlab="Month",
+         cex.main=1.5)
+```
+
+```{r}
+# Tempurature check 
+fit_2 <- stl(ts_YVRdata_temp, t.window=13, s.window="periodic", robust=TRUE)
+monthplot(seasonal(fit_2), main = "Plot 12. Seasonality pattern only for Vancouver's temperature", 
+          ylab="Monthly temperature",
+         xlab="Month",cex.main=1.5)
+```
+
+# Basic forecasting methods
+
+## Visual comparison and assessment of basic methods -- mean, drift, naive, and seasonal naive
+
+```{r}
+#mean 
+fit_mean <- meanf(YVRdata_train, 36)
+#drift
+fit_drift <- rwf(YVRdata_train, 36, drift = TRUE)
+#naive
+fit_naive <- naive(YVRdata_train, 36)
+#seasonal naive
+fit_snaive <- snaive(YVRdata_train, 36)
+
+# Plot them into one graph
+plot(ts_YVRdata, main="Plot 13. Forecasted energy usage using basic methods",
+     ylab="Energy usage (kilowatt per hours [kWh])",
+    xlab = "Year",
+    cex.main=1.5)
+lines(fit_mean$mean,col="blue",lwd = "2")
+lines(fit_drift$mean, col = "green",lwd = "2")
+lines(fit_naive$mean, col = "red",lwd = "2")
+lines(fit_snaive$mean, col = "purple")
+legend("topleft",lty=1, col=c("black","blue","green","red","purple"), 
+       c("Data", "Mean method","Drift method","Naive method","Seasonal naive method"),pch=1,cex=1) 
+```
+
+From the plot below, we can see that mean method and naïve method provide a constant forecast and perform worse than other two methods. The drift method catches the trend and grows with the time passes by, while the seasonal naïve can capture the seasonality pattern in the data. From visualized perspective, the seasonal naïve performs better. However, if we can combine the drift and seasonal naïve, we would get a more accurate forecast, and we will discuss further in later section.
+
+## Accuracy measures
+
+```{r}
+# Compare accuracy measures for each model 
+method <- c("Mean method", "Drift method","Naive method", "Seasonal naive method")
+cbind(method, rbind(round(accuracy(fit_mean, YVRdata_test)[2,c(2,3,5,6)],1),
+      round(accuracy(fit_drift, YVRdata_test)[2,c(2,3,5,6)],1),
+                    round(accuracy(fit_naive, YVRdata_test)[2,c(2,3,5,6)],1),
+                    round(accuracy(fit_snaive, YVRdata_test)[2,c(2,3,5,6)],1)))
+```
+
+## Comparison of basic methods
+
+Based on the accuracy measures for the test set, the drift has lowest measures among four methods in terms of RMSE, MAE, MAPE and MASE. We can focus on the MASE which is short for mean absolute scale error. Of MASE, the seasonal naïve would be selected as the base method as scaler for seasonal data, and MASE is the figures comparing the method to scaler method. The MASE for drift method is 1.2 (using test data) which is approximately the same but slightly worse than the seasonal naïve method using training data.
+
+# Exponential Smoothing (ETS) model
+
+The model is ETS(M, A, A)
+
+```{r}
+ets_MAA = ets(YVRdata_train, model="MAA"); summary(ets_MAA)
+# potential models set up
+ets_AAA = ets(YVRdata_train, model="AAA")
+ets_AAA_d = ets(YVRdata_train, model="AAA", damped = TRUE)
+ets_MAA = ets(YVRdata_train, model="MAA")
+ets_MAA_d = ets(YVRdata_train, model="MAA", damped = TRUE)
+# test_ets_AMA = ets(YVRdata_train, model="AMA") # Forbidden model conbination
+# test_ets_MMA = ets(YVRdata_train, model="MMA") # Forbidden model conbination
+auto_ets = ets(YVRdata_train)
+```
+
+## the estimates of the smoothing parameters
+
+```{r}
+summary(ets_MAA)$par[c(1:3)]
+```
+
+## why this model is appropriate based on the features of the data.
+
+```{r}
+autoplot(YVRdata_train)+
+theme(text = element_text(size = 20), plot.title = element_text(hjust = 0.5, size=30)) +
+ggtitle("Plot 14. YVR's Energy usage from 1997 to 2008") 
+```
+
+The original time plot shows that there is seasonality that repeats every 12 months without proportionally increasing seasonality variation over time, indicating that the model should use S = additive. There is a stable trend without expotential growth, indicating that the model should use T = additive and no dampen needed. In the end, using E = multiplicative would be better because the data are strictly positive and because it beats the forecast performance of using additive method.
+
+## Model plot
+
+```{r}
+options(repr.plot.width=15, repr.plot.height=6)
+plot(forecast(ets_MAA, h=length(YVRdata_test)), YVRdata_test,
+    main="Plot 15. YVR's Energy usage Forecast by ETS(M,A,A)",
+     cex.main=1.5
+    )
+lines(YVRdata_train, lwd=2)
+lines(fitted(ets_MAA), col='blue')
+lines(YVRdata_test, lwd=1)
+```
+
+## Goodness of fit
+
+```{r}
+method <- c("AAA", "AAA damped", "MAA", "MAA damped","Auto")
+cbind(method, 
+      round(rbind(
+          accuracy(ets_AAA) [1,c(2,3,5,6)], 
+          accuracy(ets_AAA_d) [1,c(2,3,5,6)],
+          accuracy(ets_MAA) [1,c(2,3,5,6)],
+          accuracy(ets_MAA_d) [1,c(2,3,5,6)],
+          accuracy(auto_ets) [1,c(2,3,5,6)]
+          ),4))
+```
+
+Among all models shown above, ets(A,A,A) shows the best performance of fitting the training dataset in terms of four measures (RMSE, MAE, MAPE, MASE). In the meantime, the selected model ets (M, A, A) has similar measure values as ets(A, A, A) model. As it is likely that ets(A, A, A) overfits the training data set, it is still hard to tell which one will perform the best on the test data set at this stage.
+
+## Accuracy measures
+
+```{r}
+accuracy(forecast(ets_MAA, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)]
+```
+
+## Accuracy of forecasts
+
+```{r}
+method <- c("AAA", "AAA damped", "MAA", "MAA damped","Auto","Drift","Seasonal naive")
+cbind(method, 
+      round(rbind(
+          accuracy(forecast(ets_AAA, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)], 
+          accuracy(forecast(ets_AAA_d, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(ets_MAA, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(ets_MAA_d, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(auto_ets, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_drift, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_snaive, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)]
+          ),4))
+```
+
+```{r}
+plot(forecast(ets_MAA, h=length(YVRdata_test)), YVRdata_test, xlim = c(2008, 2011),
+    main="Plot 16. YVR's Energy usage Forecast by ETS(M,A,A) from 2008 to 2011",
+     cex.main=1.5
+    )
+# lines(YVRdata_train, lwd=2)
+# lines(fitted(ets_MAA), col='blue')
+lines(YVRdata_test, lwd=1)
+lines(forecast(ets_AAA, h= length(YVRdata_test))$mean, col='green')
+legend(
+    "topleft",
+    lty=1, 
+    col=c(1,"blue","green"), 
+    c("data", "ets(M,A,A)", "ets(A,A,A)"),
+    pch=1) 
+
+```
+
+Among all the models considered so far, the ets(M,A,A) shows the best forecast result on the testing data set, successfully combining the benefits of drift and seasonal naive methods. Based on the table above, the ets(M,A,A) also has relatively higher accuracy than other basic methods. Comparing with ets(A,A,A) model, the Plot 16 shows that ets(M,A,A) forecasts better in the peak time.
+
+## Residual diagnostics
+
+```{r}
+mean(residuals(ets_MAA))
+checkresiduals(ets_MAA) 
+```
+
+The mean of residuals is close to zero, indicating no bias.
+
+In the ACF plot, there is no significant autocorrelations and the variance of residuals stays approximately constant through time. According to the histogram plot, the residuals are approximately normally distributed, but there is an outliers which might be due to random chance.
+
+In the portmanteau test, the hypothesis are as below:
+
+H0: the first 24 autocorrelations are not significantly different from a white noise process HA: the first 24 autocorrelations are significantly different from a white noise process The total number of lags tested is 24. The test statistic is 12.469, and the p-value is 0.1315. As the p-value is larger than 0.05, it cannot reject the null hypothesis and concludes that the first 24 autocorrelations are not statistically significantly different from a white noise process.
+
+# ARIMA model
+
+```{r}
+arima_fit4 = Arima(YVRdata_train, order = c(1,1,0), seasonal = c(0,1,1), include.constant=TRUE)
+summary(arima_fit4)
+# candidate model set up
+arima_fit1 = Arima(YVRdata_train, order = c(0,1,1), seasonal = c(3,1,0), include.constant=TRUE)
+arima_fit2 = Arima(YVRdata_train, order = c(1,1,0), seasonal = c(3,1,0), include.constant=TRUE) 
+arima_fit3 = Arima(YVRdata_train, order = c(0,1,1), seasonal = c(0,1,1), include.constant=TRUE) 
+arima_fit4 = Arima(YVRdata_train, order = c(1,1,0), seasonal = c(0,1,1), include.constant=TRUE) 
+arima_auto = auto.arima(YVRdata_train, stepwise=FALSE, approximation=FALSE, ic="aicc")
+```
+
+## the estimates of the parameters
+
+```{r}
+summary(arima_fit4)[1]
+```
+
+## Appropriateness of model
+
+```{r}
+options(repr.plot.width=18, repr.plot.height=6)
+par(mfrow = c(1,3))
+plot(YVRdata_train, main="Plot 17. Time Series Plot",cex.main=1.5)
+plot(diff(YVRdata_train,12),  main="Plot 18-A. Seasonal Differencing",cex.main=1.5)
+plot(diff(diff(YVRdata_train,12)),  main="Plot 18-B. First Differencing After Seasonal Differencing",cex.main=1.5)
+```
+
+```{r}
+par(mfrow=c(1,2))
+Acf( diff( diff(YVRdata_train, 12),  1 ) , lag=48, main="Plot 19. ACF After Differencing",cex.main=1.5)
+Pacf(diff( diff(YVRdata_train, 12),  1 ) , lag=48, main="Plot 20. PACF After Differencing",cex.main=1.5)
+# ggtsdisplay(diff( diff(YVRdata_train, 48),  1 ), lag=48)
+```
+
+The original time plot (Plot 17) shows that there is seasonality that repeats every 12 months (this is the value of m), indicating that we should use D=1 and do seasonal differencing of lag-12. After the seasonal differencing, the series has some trend (Plot 18-A), indicating that we should use d=1 and render the series stationary (Plot 18-B). As including constant when d+D larger than 1 is dangerous, we do not add constant here.
+
+Viewing the ACF and PACF of the series after differencing (Plot 19, 20), we start by looking at the seasonal lags only (m, 2m, 3m, etc.) and it looks like the ACF is simpler, indicating that we should include Q = 1 in our model in seasonality parts.
+
+Looking at the non-seasonal lags (up to but not including lag m), since both plots have 1 significant lag, having p=1 or q=1 in our model makes sense, and we decide to use q = 1 because of the better final performance on the testing dataset, which is shown in the following analysis.
+
+## Model plot
+
+```{r}
+plot(forecast(arima_fit4, h=length(YVRdata_test)), YVRdata_test,
+    main="Plot 21. Forecasts of Energy Usage for YVR from ARIMA(1,1,0)(0,1,1)[12]",
+    cex.main=1.5
+    )
+lines(YVRdata_train, lwd=2)
+lines(fitted(arima_fit4), col='blue')
+lines(YVRdata_test, lwd=1)
+```
+
+## Goodness of fit
+
+```{r}
+models_aicc <- c(
+    "First: (0,1,1)(3,1,0)[12]  AICc", 
+    "Second: (1,1,0)(3,1,0)[12]  AICc",
+    "Third: (0,1,1)(0,1,1)[12]  AICc", 
+    "Fourth: (1,1,0)(0,1,1)[12]  AICc",
+    "Auto.arima  (1,1,0)(2,1,0)[12] AICc")
+aicc = c(
+          arima_fit1$aicc,
+          arima_fit2$aicc,
+          arima_fit3$aicc,
+          arima_fit4$aicc,
+          arima_auto$aicc
+          )
+
+cbind(models_aicc, round(aicc,4))
+```
+
+Compared to the top two models and auto Arima model, the third and fourth models demonstrate quite lower AICc values, indicating these two models perform better. However, as the AICc values of these two models are almost the same, it is still hard to tell which one will perform better on the testing data set. Also, it is reasonable that they have similar AICc values because both p=1 or q=1 in the non-seasonality part make sense as we discussed above.
+
+## Accuracy measures
+
+```{r}
+accuracy(forecast(arima_fit4, h=length(YVRdata_test)), YVRdata_test)
+```
+
+## Accuracy of forecasts
+
+```{r}
+method <- c(
+    "Third: (0,1,1)(0,1,1)[12] ", 
+    "Fourth: (1,1,0)(0,1,1)[12] ",
+    "Drift",
+    "Seasonal naive"
+)
+cbind(method, 
+      round(rbind(
+          accuracy(forecast(arima_fit3, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(arima_fit4, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_drift, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_snaive, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)]
+          ),4))
+```
+
+Based on the Plot 21, this fourth Arima(1,1,0)(0,1,1)[12] model can fit the traning data well and also show an accurate forecast because the black line (real data) and blue line (forecast) are close. Compared with other Arima models, this fourth Arima model's accuracy measures (RMSE, MAE, MAPE, MASE) are lower than all of them. When comparing with the basic methods such as drift method and seasonal naive method, the fourth Arima model's measures significantly outperform all the others'.
+
+## Residual diagnostics
+
+```{r}
+cat('Mean of the residuals:',mean(residuals(arima_fit4)))
+checkresiduals(arima_fit4)
+```
+
+The mean of residuals is around 9.5, indicating that there is some bais and that there is still some information this model cannot capture.
+
+In the ACF plot, there is one significant autocorrelations at lag-9 and the variance of residuals stays approximately constant through time. According to the histogram plot, the residuals are approximately normally distributed, but there is an outlier which is due to sudden increase of residuals in around 2005.
+
+In the portmanteau test, the hypothesis are as below: - H0: the first 24 autocorrelations are not significantly different from a white noise process - HA: the first 24 autocorrelations are significantly different from a white noise process
+
+The total number of lags tested is 24. The test statistic is 17.722, and the p-value is 0.7223. As the p-value is larger than 0.05, it cannot reject the null hypothesis and concludes that the first 24 autocorrelations are not statistically significantly different from a white noise process.
+
+# Comparison of all models
+
+Among all the basic, ETS, and Arima methods, the ETS(M,A,A) shows the best performance in terms of four measures (RMSE, MAE, MAPE, MASE) and thus becomes our final model. Viewing these methods in detail, it is obvious that the four basic methods are far worse than other models. The reason is that most of them are linear lines while forecasting seasonal data and that the only model considering seasonality does not take the trend into account. As for the ETS and Arima models, their performances are quite similar but the ETS model is better. The reason can be proved by the non-zero mean of residuals in the Arima model. With the non-zero mean of residuals, the Arima model does not capture all the important information so its forecast is not as accuracy as the ETS model. When viewing the Plot 23 the forecast line of the ETS model follows closer than all other forecast lines, indicating that the ETS is better than other models.
+
+```{r}
+method <- c(
+    "ETS(M,A,A) ", 
+    "Final Arima model (1,1,0)(0,1,1)[12] ",
+    "Mean method", 
+    "Drift method",
+    "Naive method", 
+    "Seasonal naive method"
+)
+cbind(method, 
+      round(rbind(
+          accuracy(forecast(ets_MAA, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(arima_fit4, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_mean, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_drift, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_naive, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)],
+          accuracy(forecast(fit_snaive, h=length(YVRdata_test)) , YVRdata_test)[2,c(2,3,5,6)]
+          ),4))
+```
+
+```{r}
+plot(forecast(ets_MAA, h=length(YVRdata_test)), YVRdata_test, xlim = c(2008, 2011),
+    main="Plot 22. YVR's Energy usage Forecast from 2008 to 2011",
+     cex.main=1.5
+    )
+lines(YVRdata_test, lwd=2)
+lines(forecast(arima_fit4, h= length(YVRdata_test))$mean, col='green')
+lines(forecast(fit_mean, h= length(YVRdata_test))$mean, col='purple')
+lines(forecast(fit_drift, h= length(YVRdata_test))$mean, col='red')
+lines(forecast(fit_naive, h= length(YVRdata_test))$mean, col='orange')
+lines(forecast(fit_snaive, h= length(YVRdata_test))$mean, col='yellow')
+legend(
+    "topleft",
+    lty=1, 
+    col=c(1,"blue","green", "purple","red","orange","yellow"), 
+    c("data", "ets(M,A,A)", "Arima model (1,1,0)(0,1,1)[12]","Mean","Drift","Naive", "Snaive"),
+    cex=1.1,
+    bty = "n"
+) 
+```
+
+# Forecasts
+
+```{r}
+ets_MAA = ets(ts_YVRdata, model="MAA")
+plot(forecast(ets_MAA, h=3*12), ts_YVRdata,
+    main="Plot 23. Forecasts of Energy Usage for YVR by ETS(M,A,A) from 2011 to 2013",
+     cex.main=1.5
+    )
+lines(ts_YVRdata, lwd=2)
+```
+
+# Discussion
+
+Exponential smoothing model is unable to handle irregular pattern such as the few outliers or spikes shown in our remainder graph from decomposition analysis. Smoothing effect would reduce the significance of abnormal observations. Our recommendation would be using other model such ARIMA model to assist with interpretation of results from ETS for a complete picture of data.
+
+The ETS is not as effective when forecasting in long term. The trend assumption is linear and will keep increasing as time passes. Therefore, if we need to investigate the future forecasting in 25 years and more, the additive trend assumption might be unrealistic for the energy usage in YVR. The recommendation would be adding damped or try high order trend to reflect complex trend in a long-term projection.
+
+Another limitation would be that the ETS is unable to handle complex seasonality since our final recommendation is the additive assumption for seasonality. And for EST in general, it assumes fixed and single seasonality. However, from our observation, the seasonality from temperature for energy usage shows a peak in winter and summer season. Meanwhile, the total number of passengers has a seasonality peaked in summer only. The double effect from two type of seasonality (different frequency and peaks) could lead inaccurate forecast in long run with ETS. We would recommend conducting further investigation such as explanatory analysis, capturing different impact from related variables.
+
+# Potential Improvement - Explanatory model
+
+## Describe a possible explanatory model to try (you do not have to create this model). Explain the process required to be able to use this model to forecast.
+
+The first step would be selecting related variables which can explain the energy usage. From the potential cause discussion, the number of total passengers and average temperature have relationship with the seasonality of energy usage. The area of YVR airport will impact the trend of energy usage.
+
+We could use the three features to form a multivariate regression model respect to energy usage. The second step would be fitting an appropriate model to include the three features. We need to check on potential transformation of variables. We can use best-subset selection to choose the explanatory model since the dimension of variables is small.
+
+The third step would be forecasting for the three variables. The fitting procedure will be like what we performed on the energy usage with time. We need to check the residuals while fitting. There are different potential models such are ETS and ARIMA. With appropriate models, we can forecast a set of values for three variables.
+
+Finally, we can plug these outputs from three time series models (step three) into the explanatory model in step two to forecast a set of future value of energy usage. Use accuracy measures as per usual to assess how good these forecasts of the test set are.
+
+# Appendix A: ETS models
+
+```{r}
+ets_AAA = ets(YVRdata_train, model="AAA")
+ets_AAA_d = ets(YVRdata_train, model="AAA", damped = TRUE)
+ets_MAA = ets(YVRdata_train, model="MAA") # final model
+ets_MAA_d = ets(YVRdata_train, model="MAA", damped = TRUE)
+# test_ets_AMA = ets(YVRdata_train, model="AMA") # Forbidden model conbination
+# test_ets_MMA = ets(YVRdata_train, model="MMA") # Forbidden model conbination
+auto_ets = ets(YVRdata_train)
+
+plot(YVRdata_train, lwd=2, xlim = c(1997, 2011), ylim = c(5000,9000), 
+    main="Plot 25. YVR's Energy usage Forecast by Different ETS Models",
+    cex.main=1.5)
+lines(YVRdata_test, lwd=2)
+lines(forecast(ets_AAA, h= length(YVRdata_test))$mean, col='blue')
+lines(forecast(ets_AAA_d, h= length(YVRdata_test))$mean, col='green')
+lines(forecast(ets_MAA, h= length(YVRdata_test))$mean, col='purple')
+lines(forecast(ets_MAA_d, h= length(YVRdata_test))$mean, col='red')
+lines(forecast(auto_ets, h= length(YVRdata_test))$mean, col='orange')
+legend(
+    "topleft",
+    lty=1, 
+    col=c(1,"blue","green", "purple","red","orange"), 
+    c("data", "AAA", "AAA damped", "MAA", "MAA damped","Auto"),
+    cex=1.1,
+    bty = "n"
+) 
+```
+
+# Appendix B: ARIMA Models
+
+```{r}
+arima_fit1 = Arima(YVRdata_train, order = c(0,1,1), seasonal = c(3,1,0), include.constant=TRUE)
+arima_fit2 = Arima(YVRdata_train, order = c(1,1,0), seasonal = c(3,1,0), include.constant=TRUE)
+arima_fit3 = Arima(YVRdata_train, order = c(0,1,1), seasonal = c(0,1,1), include.constant=TRUE)
+arima_fit4 = Arima(YVRdata_train, order = c(1,1,0), seasonal = c(0,1,1), include.constant=TRUE)
+arima_auto = auto.arima(YVRdata_train, stepwise=FALSE, approximation=FALSE, ic="aicc")
+
+plot(YVRdata_train, lwd=2, xlim = c(1997, 2011), ylim = c(5000,10000),
+    main="Plot 25. YVR's Energy usage Forecast by Different Arima Models",
+     cex.main=1.5
+    )
+lines(YVRdata_test, lwd=2)
+lines(forecast(arima_fit1, h= length(YVRdata_test))$mean, col='blue')
+lines(forecast(arima_fit2, h= length(YVRdata_test))$mean, col='green')
+lines(forecast(arima_fit3, h= length(YVRdata_test))$mean, col='purple')
+lines(forecast(arima_fit4, h= length(YVRdata_test))$mean, col='red')
+lines(forecast(arima_auto, h= length(YVRdata_test))$mean, col='orange')
+legend(
+    "topleft",
+    lty=1, 
+    col=c(1,"blue","green", "purple","red","orange"), 
+    c("data", 
+     "First: (0,1,1)(3,1,0)[12]", 
+    "Second: (1,1,0)(3,1,0)[12]",
+    "Third: (0,1,1)(0,1,1)[12]", 
+    "Fourth: (1,1,0)(0,1,1)[12]",
+    "Auto.arima  (1,1,0)(2,1,0)[12]"
+     ),
+    cex=1.1,
+    bty = "n"
+) 
+```
